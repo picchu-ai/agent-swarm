@@ -1,4 +1,4 @@
-import { ChevronLeft, ChevronRight, Clock, Plus, Search, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, Clock, Folder, Plus, Search, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useAgents } from "@/api/hooks/use-agents";
@@ -322,6 +322,8 @@ export default function TasksPage() {
   const scheduleFilter = searchParams.get("schedule") ?? "all";
   const requesterFilter = searchParams.get("requester") ?? "all";
   const searchParam = searchParams.get("search") ?? "";
+  // Project filter, set by the sidebar's project rail. Empty = every project.
+  const contextKeyFilter = searchParams.get("contextKey") ?? "";
   const includeHeartbeat = searchParams.get("heartbeat") === "true";
   const page = searchParams.has("page") ? Number(searchParams.get("page")) : 0;
   // Page size is URL-driven so it survives reload / sharing. Falls back to the
@@ -385,6 +387,7 @@ export default function TasksPage() {
       search?: string;
       includeHeartbeat?: boolean;
       requestedByUserId?: string;
+      contextKey?: string;
       limit: number;
       offset: number;
     } = {
@@ -401,12 +404,16 @@ export default function TasksPage() {
     } else if (requesterFilter !== "all") {
       f.requestedByUserId = requesterFilter;
     }
+    // Set by the sidebar's project rail. `none` is the server's sentinel for
+    // "no context key", so it is passed through verbatim rather than dropped.
+    if (contextKeyFilter) f.contextKey = contextKeyFilter;
     return f;
   }, [
     statusFilter,
     agentFilter,
     scheduleFilter,
     requesterFilter,
+    contextKeyFilter,
     currentUserId,
     searchParam,
     includeHeartbeat,
@@ -492,6 +499,7 @@ export default function TasksPage() {
     agentFilter !== "all" ||
     scheduleFilter !== "all" ||
     requesterFilter !== "all" ||
+    contextKeyFilter !== "" ||
     searchParam !== "" ||
     includeHeartbeat ||
     page !== 0;
@@ -589,6 +597,23 @@ export default function TasksPage() {
               })),
             ]}
           />
+        )}
+        {/* The project filter arrives from the sidebar rail, not from a control
+            on this page — surface it as a removable chip so a filtered list is
+            never silently filtered. */}
+        {contextKeyFilter && (
+          <Badge variant="outline" size="tag" className="gap-1 h-7 px-2">
+            <Folder className="size-3 shrink-0" />
+            {contextKeyFilter === "none" ? "No project" : contextKeyFilter}
+            <button
+              type="button"
+              onClick={() => setParam("contextKey", "")}
+              aria-label="Clear project filter"
+              className="ml-0.5 text-muted-foreground hover:text-foreground"
+            >
+              <X className="size-3" />
+            </button>
+          </Badge>
         )}
         <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none">
           <Switch

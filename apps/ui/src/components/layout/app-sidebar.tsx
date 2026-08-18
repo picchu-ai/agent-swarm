@@ -1,9 +1,13 @@
+import { Folder } from "lucide-react";
 import type { ForwardRefExoticComponent, RefAttributes } from "react";
 import { useRef, useState } from "react";
-import { NavLink, useLocation } from "react-router-dom";
+import { NavLink, useLocation, useSearchParams } from "react-router-dom";
+import { useApprovalRequests } from "@/api/hooks/use-approval-requests";
 import { useDashboardCosts } from "@/api/hooks/use-costs";
 import { useFeatureGate } from "@/api/hooks/use-feature-gate";
 import { useMetrics } from "@/api/hooks/use-metrics";
+import { useTaskContextKeys } from "@/api/hooks/use-task-context-keys";
+import { useTasks } from "@/api/hooks/use-tasks";
 import { useUsers } from "@/api/hooks/use-users";
 import type { UserRole } from "@/api/types";
 import { useStatusContext } from "@/app/status-context";
@@ -43,6 +47,7 @@ import {
   SidebarRail,
 } from "@/components/ui/sidebar";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { formatContextKey } from "@/lib/context-keys";
 import { formatCost } from "@/lib/cost-format";
 import { cn, formatCompactNumber } from "@/lib/utils";
 import { SwarmSwitcher } from "./swarm-switcher";
@@ -351,6 +356,93 @@ function FooterNavItem({ item, isActive, badge }: FooterNavItemProps) {
   );
 }
 
+/**
+ * Sub-project rail, grouped by task `contextKey`.
+ *
+ * `contextKey` is the only grouping axis in the data model that is correct by
+ * construction — it is set at ingress and inherited by every child task, so no
+ * heuristic (tag sniffing, description parsing, `dir` guessing) is involved. It
+ * can be sparse: a swarm whose traffic all arrives through one Slack channel
+ * has exactly one key. That is a true answer, and the rail hides itself
+ * entirely when the API reports zero keys rather than inventing groups.
+ *
+ * Expanded sidebar only — a project list has no icon vocabulary, so the
+ * icon-collapsed rail would just be a column of identical glyphs.
+ */
+function ProjectsRail({ enabled }: { enabled: boolean }) {
+  const location = useLocation();
+  const [searchParams] = useSearchParams();
+  const { data: contextKeys } = useTaskContextKeys({ enabled });
+  // Count of the "no context key" bucket. `limit: 1` — only `total` is read.
+  const { data: unassigned } = useTasks(
+    { contextKey: "none", limit: 1 },
+    { keepPreviousData: true },
+  );
+
+  const groups = contextKeys ?? [];
+  if (!enabled || groups.length === 0) return null;
+
+  const activeKey = location.pathname === "/tasks" ? searchParams.get("contextKey") : null;
+  const unassignedCount = unassigned?.total ?? 0;
+
+  const rows: { key: string; to: string; scope: string | null; label: string; count: number }[] = [
+    ...groups.map((group) => {
+      const { scope, label } = formatContextKey(group.contextKey);
+      return {
+        key: group.contextKey,
+        to: `/tasks?contextKey=${encodeURIComponent(group.contextKey)}`,
+        scope,
+        label,
+        count: group.taskCount,
+      };
+    }),
+    ...(unassignedCount > 0
+      ? [
+          {
+            key: "none",
+            to: "/tasks?contextKey=none",
+            scope: null,
+            label: "No project",
+            count: unassignedCount,
+          },
+        ]
+      : []),
+  ];
+
+  return (
+    <SidebarGroup>
+      <div className="group-data-[collapsible=icon]:hidden">
+        <CollapsibleSection
+          title="PROJECTS"
+          defaultOpen
+          persistKey="agent-swarm:sidebar-group:projects"
+        >
+          <SidebarGroupContent>
+            <SidebarMenu>
+              {rows.map((row) => (
+                <SidebarMenuItem key={row.key}>
+                  <SidebarMenuButton asChild isActive={activeKey === row.key}>
+                    <NavLink to={row.to} className="min-w-0">
+                      <Folder className="size-4 shrink-0" />
+                      <span className="truncate">
+                        {row.scope ? (
+                          <span className="text-sidebar-foreground/50">{row.scope}/</span>
+                        ) : null}
+                        {row.label}
+                      </span>
+                    </NavLink>
+                  </SidebarMenuButton>
+                  <SidebarMenuBadge>{formatCompactNumber(row.count)}</SidebarMenuBadge>
+                </SidebarMenuItem>
+              ))}
+            </SidebarMenu>
+          </SidebarGroupContent>
+        </CollapsibleSection>
+      </div>
+    </SidebarGroup>
+  );
+}
+
 export function AppSidebar() {
   const location = useLocation();
   const { data: status } = useStatusContext();
@@ -361,6 +453,7 @@ export function AppSidebar() {
     "1.79.0": useFeatureGate("1.79.0"), // Pages
     "1.80.0": useFeatureGate("1.80.0"), // People
     "1.82.0": useFeatureGate("1.82.0"), // Live nav-item counts
+    "1.132.0": useFeatureGate("1.132.0"), // GET /api/task-context-keys (projects rail)
   };
   const isGated = (item: NavItem) =>
     !!item.gate && gates[item.gate.minVersion]?.supported === false;
@@ -372,6 +465,10 @@ export function AppSidebar() {
   const { data: metrics } = useMetrics({ enabled: countsEnabled });
   const { data: dashboardCosts } = useDashboardCosts({ enabled: countsEnabled });
   const { data: users } = useUsers();
+  // Pending decisions, surfaced as a count on the Approvals nav item so a
+  // waiting decision is visible from every route — not only once you land on
+  // /approval-requests. Server-side `status` filter: no client-side counting.
+  const { data: pendingApprovals } = useApprovalRequests({ status: "pending" });
 
   // Map of `nav path -> resolved badge string`. An entry is present only when
   // the value is loaded and worth showing; absence means "no badge".
@@ -389,6 +486,12 @@ export function AppSidebar() {
     if (typeof costToday === "number") {
       badges["/usage"] = formatCost(costToday, { precision: "compact" });
     }
+  }
+  // Not gated on 1.82 — `/api/approval-requests?status=pending` predates the
+  // live-counts work, so this badge is safe on every supported server.
+  const pendingApprovalCount = pendingApprovals?.length ?? 0;
+  if (pendingApprovalCount > 0) {
+    badges["/approval-requests"] = formatCompactNumber(pendingApprovalCount);
   }
 
   const identityName = status?.identity.name ?? "Agent Swarm";
@@ -520,6 +623,7 @@ export function AppSidebar() {
             </SidebarGroup>
           );
         })}
+        <ProjectsRail enabled={gates["1.132.0"].supported} />
       </SidebarContent>
 
       <SidebarFooter className="border-t border-sidebar-border">

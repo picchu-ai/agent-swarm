@@ -20,6 +20,7 @@ import {
   getSteeringMessagesForTask,
   getTaskAttachments,
   getTaskById,
+  getTaskContextKeyGroups,
   getTasksCount,
   markSteeringDelivered,
   markSteeringHandled,
@@ -64,6 +65,7 @@ import {
   SteerResultSchema,
   splitLegacyModelAlias,
   TaskAttachmentSchema,
+  TaskContextKeyGroupSchema,
 } from "../types";
 import { getRequestAuth } from "../utils/request-auth-context";
 import { scrubSecrets } from "../utils/secret-scrubber";
@@ -190,6 +192,12 @@ const listTasks = route({
      * instead. Omit to return every task regardless of requester.
      */
     requestedByUserId: z.string().min(1).optional(),
+    /**
+     * Restrict results to tasks carrying this exact `contextKey`. The sentinel
+     * `none` matches rows where it IS NULL instead. Omit for every task.
+     * Enumerate the available keys via `GET /api/task-context-keys`.
+     */
+    contextKey: z.string().min(1).optional(),
     /** `createdAt` enables stable time-axis paging; default preserves table freshness ordering. */
     orderBy: z.enum(["lastUpdatedAt", "createdAt"]).optional(),
     limit: z.coerce.number().int().optional(),
@@ -479,6 +487,29 @@ const finishTask = route({
   },
 });
 
+// Deliberately NOT mounted under `/api/tasks/…`: that subtree is owned by the
+// `["api", "tasks", null]` by-id pattern, and a literal third segment there
+// would be ambiguous with a task whose id is "context-keys".
+const listTaskContextKeys = route({
+  method: "get",
+  path: "/api/task-context-keys",
+  pattern: ["api", "task-context-keys"],
+  summary: "List distinct task context keys with counts",
+  description:
+    "Aggregates `agent_tasks.contextKey` into one row per key, with a task count and the group's last activity. Intended for grouping/filtering UI (the dashboard project rail) that must see every key, not just the current task-list page. Tasks with no context key are omitted — count them with `GET /api/tasks?contextKey=none`.",
+  tags: ["Tasks"],
+  query: z.object({
+    /** Mirrors the task list's flag so a rail count matches the list it links to. */
+    includeHeartbeat: z.enum(["true", "false"]).optional(),
+  }),
+  responses: {
+    200: {
+      description: "Context-key groups, most recently active first",
+      schema: z.object({ contextKeys: z.array(TaskContextKeyGroupSchema) }),
+    },
+  },
+});
+
 const listPausedTasks = route({
   method: "get",
   path: "/api/paused-tasks",
@@ -688,6 +719,11 @@ export async function handleTasks(
           ? parsed.query.requestedByUserId
           : undefined,
       requestedByUserIdIsNull: parsed.query.requestedByUserId === "none" || undefined,
+      contextKey:
+        parsed.query.contextKey && parsed.query.contextKey !== "none"
+          ? parsed.query.contextKey
+          : undefined,
+      contextKeyIsNull: parsed.query.contextKey === "none" || undefined,
       orderBy: parsed.query.orderBy,
       limit: parsed.query.limit,
       offset: parsed.query.offset,
@@ -1334,6 +1370,16 @@ export async function handleTasks(
         ? { wasForcedOverwrite: true }
         : {}),
     });
+    return true;
+  }
+
+  if (listTaskContextKeys.match(req.method, pathSegments)) {
+    const parsed = await listTaskContextKeys.parse(req, res, pathSegments, queryParams);
+    if (!parsed) return true;
+    const contextKeys = getTaskContextKeyGroups({
+      includeHeartbeat: parsed.query.includeHeartbeat === "true",
+    });
+    listTaskContextKeys.respond(res, 200, { contextKeys });
     return true;
   }
 
