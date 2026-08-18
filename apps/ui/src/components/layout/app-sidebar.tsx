@@ -1,6 +1,6 @@
 import { Folder } from "lucide-react";
 import type { ForwardRefExoticComponent, RefAttributes } from "react";
-import { useRef, useState } from "react";
+import { Fragment, useRef, useState } from "react";
 import { NavLink, useLocation, useSearchParams } from "react-router-dom";
 import { useApprovalRequests } from "@/api/hooks/use-approval-requests";
 import { useDashboardCosts } from "@/api/hooks/use-costs";
@@ -534,96 +534,101 @@ export function AppSidebar() {
           const items = group.items;
           if (items.length === 0) return null;
           return (
-            <SidebarGroup key={group.id}>
-              {/* Section title is hidden in icon-collapsed mode — the items
+            <Fragment key={group.id}>
+              <SidebarGroup>
+                {/* Section title is hidden in icon-collapsed mode — the items
                   themselves stay so you still get the navigation, just
                   without the truncated "WOR / SWA / RES…" labels. */}
-              <div className="group-data-[collapsible=icon]:hidden">
-                <CollapsibleSection
-                  title={group.label}
-                  defaultOpen
-                  persistKey={`agent-swarm:sidebar-group:${group.id}`}
-                >
+                <div className="group-data-[collapsible=icon]:hidden">
+                  <CollapsibleSection
+                    title={group.label}
+                    defaultOpen
+                    persistKey={`agent-swarm:sidebar-group:${group.id}`}
+                  >
+                    <SidebarGroupContent>
+                      <SidebarMenu>
+                        {items.map((item) => {
+                          const isActive =
+                            item.path === "/"
+                              ? location.pathname === "/"
+                              : location.pathname.startsWith(item.path) ||
+                                !!item.children?.some((child) =>
+                                  location.pathname.startsWith(child.path),
+                                );
+                          const gated = isGated(item);
+                          if (gated) return null;
+                          const badge = badges[item.path];
+                          return (
+                            <SidebarMenuItem key={item.path}>
+                              <NavIconLink
+                                item={item}
+                                isActive={isActive}
+                                end={item.path === "/"}
+                                showBeta
+                              />
+                              {/* Live count — auto-hidden when icon-collapsed. */}
+                              {badge != null && <SidebarMenuBadge>{badge}</SidebarMenuBadge>}
+                              {item.children && (
+                                <div className="ml-6 mt-1 flex flex-col gap-0.5 border-l border-sidebar-border pl-2">
+                                  {item.children.map((child) => (
+                                    <NavLink
+                                      key={child.path}
+                                      to={child.path}
+                                      className={({ isActive: childActive }) =>
+                                        cn(
+                                          "rounded-sm px-2 py-1 text-sm transition-colors hover-linger",
+                                          childActive
+                                            ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                                            : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60 hover:text-sidebar-foreground",
+                                        )
+                                      }
+                                    >
+                                      {child.title}
+                                    </NavLink>
+                                  ))}
+                                </div>
+                              )}
+                            </SidebarMenuItem>
+                          );
+                        })}
+                      </SidebarMenu>
+                    </SidebarGroupContent>
+                  </CollapsibleSection>
+                </div>
+                {/* Icon-only mirror — rendered only when sidebar is collapsed.
+                  Same items, no section header chrome. */}
+                <div className="hidden group-data-[collapsible=icon]:block">
                   <SidebarGroupContent>
                     <SidebarMenu>
                       {items.map((item) => {
                         const isActive =
                           item.path === "/"
                             ? location.pathname === "/"
-                            : location.pathname.startsWith(item.path) ||
-                              !!item.children?.some((child) =>
-                                location.pathname.startsWith(child.path),
-                              );
+                            : location.pathname.startsWith(item.path);
                         const gated = isGated(item);
                         if (gated) return null;
-                        const badge = badges[item.path];
                         return (
                           <SidebarMenuItem key={item.path}>
                             <NavIconLink
                               item={item}
                               isActive={isActive}
                               end={item.path === "/"}
-                              showBeta
+                              tooltip={item.title}
                             />
-                            {/* Live count — auto-hidden when icon-collapsed. */}
-                            {badge != null && <SidebarMenuBadge>{badge}</SidebarMenuBadge>}
-                            {item.children && (
-                              <div className="ml-6 mt-1 flex flex-col gap-0.5 border-l border-sidebar-border pl-2">
-                                {item.children.map((child) => (
-                                  <NavLink
-                                    key={child.path}
-                                    to={child.path}
-                                    className={({ isActive: childActive }) =>
-                                      cn(
-                                        "rounded-sm px-2 py-1 text-sm transition-colors hover-linger",
-                                        childActive
-                                          ? "bg-sidebar-accent text-sidebar-accent-foreground"
-                                          : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60 hover:text-sidebar-foreground",
-                                      )
-                                    }
-                                  >
-                                    {child.title}
-                                  </NavLink>
-                                ))}
-                              </div>
-                            )}
                           </SidebarMenuItem>
                         );
                       })}
                     </SidebarMenu>
                   </SidebarGroupContent>
-                </CollapsibleSection>
-              </div>
-              {/* Icon-only mirror — rendered only when sidebar is collapsed.
-                  Same items, no section header chrome. */}
-              <div className="hidden group-data-[collapsible=icon]:block">
-                <SidebarGroupContent>
-                  <SidebarMenu>
-                    {items.map((item) => {
-                      const isActive =
-                        item.path === "/"
-                          ? location.pathname === "/"
-                          : location.pathname.startsWith(item.path);
-                      const gated = isGated(item);
-                      if (gated) return null;
-                      return (
-                        <SidebarMenuItem key={item.path}>
-                          <NavIconLink
-                            item={item}
-                            isActive={isActive}
-                            end={item.path === "/"}
-                            tooltip={item.title}
-                          />
-                        </SidebarMenuItem>
-                      );
-                    })}
-                  </SidebarMenu>
-                </SidebarGroupContent>
-              </div>
-            </SidebarGroup>
+                </div>
+              </SidebarGroup>
+              {/* Directly under WORK: the rail filters the Tasks list, and the
+                sidebar is long enough that appending it after every group
+                puts it below the fold on a laptop viewport. */}
+              {group.id === "work" && <ProjectsRail enabled={gates["1.132.0"].supported} />}
+            </Fragment>
           );
         })}
-        <ProjectsRail enabled={gates["1.132.0"].supported} />
       </SidebarContent>
 
       <SidebarFooter className="border-t border-sidebar-border">
