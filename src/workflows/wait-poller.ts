@@ -1,4 +1,5 @@
 import { getDueWaitStates } from "../be/db";
+import { sweepExpiredApprovalRequests } from "../http/approval-requests";
 import type { ExecutorRegistry } from "./executors/registry";
 import { resumeWaitState } from "./resume";
 
@@ -21,6 +22,11 @@ let pollerTimeout: ReturnType<typeof setTimeout> | null = null;
  *
  * Errors per row are logged and the loop continues; one bad wait must not
  * starve the rest.
+ *
+ * The same tick also sweeps standalone approval requests past their `expiresAt`
+ * (see `sweepExpiredApprovalRequests`). It rides this poller rather than a new
+ * timer because it is the same job — pending rows whose deadline has passed —
+ * on the same 5s cadence.
  */
 export function startWaitPoller(registry: ExecutorRegistry, intervalMs = 5000): void {
   if (pollerTimeout !== null) return; // Already running
@@ -44,6 +50,12 @@ export function startWaitPoller(registry: ExecutorRegistry, intervalMs = 5000): 
       }
     } catch (err) {
       console.error("[workflows] Wait poller tick error:", err);
+    }
+
+    try {
+      sweepExpiredApprovalRequests();
+    } catch (err) {
+      console.error("[approvals] Expired-approval sweep tick error:", err);
     }
 
     // Schedule the next tick after this one completes.

@@ -6,6 +6,7 @@ import {
   createApprovalRequest,
   createTaskExtended,
   getApprovalRequestById,
+  getExpiredPendingApprovals,
   getTaskById,
   listApprovalRequests,
   resolveApprovalRequest,
@@ -149,6 +150,126 @@ export function missingRequiredResponseIds(
     )
     .map((question) => question.id);
 }
+
+// ─── Terminal transition ─────────────────────────────────────────────────────
+
+export type ApprovalFinalizeResult =
+  | { ok: true; request: ApprovalRequest }
+  | { ok: false; currentStatus: string; expiredWhilePending: boolean };
+
+function isPastDeadline(request: ApprovalRequest): boolean {
+  return request.expiresAt !== null && Date.parse(request.expiresAt) <= Date.now();
+}
+
+/**
+ * Move an approval request to a terminal status and fire its side effects.
+ *
+ * The transition itself is `resolveApprovalRequest`'s single atomic UPDATE
+ * (`status = 'pending'` + the `expiresAt` guard), so concurrent callers — a late
+ * responder and the expiry sweep — can never both win. Only the caller whose CAS
+ * returned a row runs the effects below, which is what keeps "one terminal
+ * transition, one effect" true under a race.
+ */
+export function finalizeApprovalRequest(
+  id: string,
+  data: {
+    status: "approved" | "rejected" | "timeout";
+    responses?: Record<string, unknown>;
+    resolvedBy?: string;
+  },
+): ApprovalFinalizeResult {
+  const updated = resolveApprovalRequest(id, data);
+  if (!updated) {
+    const current = getApprovalRequestById(id);
+    return {
+      ok: false,
+      currentStatus: current?.status ?? "unknown",
+      // Still pending but past its deadline → the CAS's expiry guard rejected it,
+      // not a concurrent resolution.
+      expiredWhilePending:
+        current !== null && current.status === "pending" && isPastDeadline(current),
+    };
+  }
+
+  // Emit event for workflow resume
+  if (updated.workflowRunId && updated.workflowRunStepId) {
+    workflowEventBus.emit("approval.resolved", {
+      requestId: updated.id,
+      status: updated.status,
+      responses: updated.responses,
+      workflowRunId: updated.workflowRunId,
+      workflowRunStepId: updated.workflowRunStepId,
+    });
+  }
+
+  // For standalone (non-workflow) requests, create a follow-up task
+  // so the requesting agent is notified of the outcome
+  if (!updated.workflowRunId && updated.sourceTaskId) {
+    createStandaloneFollowUpTask(updated);
+  }
+
+  return { ok: true, request: updated };
+}
+
+function createStandaloneFollowUpTask(updated: ApprovalRequest): void {
+  const sourceTask = getTaskById(updated.sourceTaskId!);
+  if (!sourceTask) return;
+
+  const { text: taskText } =
+    updated.status === "timeout"
+      ? resolveTemplate("hitl.timeout", {
+          request_id: updated.id,
+          title: updated.title,
+          expires_at: updated.expiresAt ?? "",
+        })
+      : resolveTemplate("hitl.follow_up", {
+          request_id: updated.id,
+          title: updated.title,
+          status: updated.status,
+          responses: formatResponses(
+            updated.questions as Array<{ id: string; type: string; label: string }>,
+            updated.responses as Record<string, unknown>,
+          ),
+        });
+
+  createTaskExtended(taskText, {
+    agentId: sourceTask.agentId,
+    parentTaskId: updated.sourceTaskId!,
+    source: "system",
+    taskType: "hitl-follow-up",
+    tags: ["hitl", "follow-up"],
+    // Explicit Slack metadata — parentTaskId auto-inherits too,
+    // but being explicit ensures the follow-up task always gets
+    // the right thread context even if inheritance logic changes.
+    slackChannelId: sourceTask.slackChannelId ?? undefined,
+    slackThreadTs: sourceTask.slackThreadTs ?? undefined,
+    slackUserId: sourceTask.slackUserId ?? undefined,
+  });
+}
+
+/**
+ * Sweep standalone approval requests past their `expiresAt` into `timeout`.
+ *
+ * Idempotent: the terminal transition is the CAS in `finalizeApprovalRequest`,
+ * so a row already swept (or resolved in the meantime) is skipped and a second
+ * pass is a no-op. Workflow-linked requests are deliberately excluded — the
+ * workflow engine owns their expiry so the run resumes on its `timeout` port.
+ *
+ * Returns the number of requests this pass actually timed out.
+ */
+export function sweepExpiredApprovalRequests(): number {
+  let sweptCount = 0;
+  for (const expired of getExpiredPendingApprovals({ standaloneOnly: true })) {
+    try {
+      if (finalizeApprovalRequest(expired.id, { status: "timeout" }).ok) sweptCount++;
+    } catch (err) {
+      console.error(`[approvals] Failed to expire approval request ${expired.id}:`, err);
+    }
+  }
+  return sweptCount;
+}
+
+// ─── Route Definitions (continued) ───────────────────────────────────────────
 
 const createRoute = route({
   method: "post",
@@ -294,67 +415,26 @@ export async function handleApprovalRequests(
       }
     }
 
-    const updated = resolveApprovalRequest(parsed.params.id, {
+    const result = finalizeApprovalRequest(parsed.params.id, {
       status,
       responses: parsed.body.responses,
       resolvedBy: parsed.body.respondedBy,
     });
 
-    if (!updated) {
-      jsonError(
-        res,
-        "Failed to resolve approval request (may have been resolved concurrently)",
-        409,
-      );
+    if (!result.ok) {
+      if (result.expiredWhilePending) {
+        // The response landed after the deadline. Drive the request to its
+        // terminal `timeout` status now rather than leaving it pending — the CAS
+        // makes this a no-op if the sweep got there first.
+        finalizeApprovalRequest(parsed.params.id, { status: "timeout" });
+        jsonError(res, "Approval request expired before this response arrived", 409);
+        return true;
+      }
+      jsonError(res, `Approval request already resolved with status: ${result.currentStatus}`, 409);
       return true;
     }
 
-    // Emit event for workflow resume
-    if (updated.workflowRunId && updated.workflowRunStepId) {
-      workflowEventBus.emit("approval.resolved", {
-        requestId: updated.id,
-        status: updated.status,
-        responses: updated.responses,
-        workflowRunId: updated.workflowRunId,
-        workflowRunStepId: updated.workflowRunStepId,
-      });
-    }
-
-    // For standalone (non-workflow) requests, create a follow-up task
-    // so the requesting agent is notified of the human's response
-    if (!updated.workflowRunId && updated.sourceTaskId) {
-      const sourceTask = getTaskById(updated.sourceTaskId);
-      if (sourceTask) {
-        // Format responses for the template
-        const formattedResponses = formatResponses(
-          updated.questions as Array<{ id: string; type: string; label: string }>,
-          updated.responses as Record<string, unknown>,
-        );
-
-        const { text: taskText } = resolveTemplate("hitl.follow_up", {
-          request_id: updated.id,
-          title: updated.title,
-          status: updated.status,
-          responses: formattedResponses,
-        });
-
-        createTaskExtended(taskText, {
-          agentId: sourceTask.agentId,
-          parentTaskId: updated.sourceTaskId,
-          source: "system",
-          taskType: "hitl-follow-up",
-          tags: ["hitl", "follow-up"],
-          // Explicit Slack metadata — parentTaskId auto-inherits too,
-          // but being explicit ensures the follow-up task always gets
-          // the right thread context even if inheritance logic changes.
-          slackChannelId: sourceTask.slackChannelId ?? undefined,
-          slackThreadTs: sourceTask.slackThreadTs ?? undefined,
-          slackUserId: sourceTask.slackUserId ?? undefined,
-        });
-      }
-    }
-
-    respondRoute.respond(res, 200, { approvalRequest: toApprovalRequestResponse(updated) });
+    respondRoute.respond(res, 200, { approvalRequest: toApprovalRequestResponse(result.request) });
     return true;
   }
 

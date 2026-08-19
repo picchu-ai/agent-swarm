@@ -11112,11 +11112,21 @@ export function resolveApprovalRequest(
   },
 ): ApprovalRequest | null {
   const now = new Date().toISOString();
+  // The `expiresAt` guard lives INSIDE the compare-and-swap, not as a read-then-write
+  // check in the caller: a late response racing the expiry sweep must never be able to
+  // slip an approve/reject through the window between the read and the UPDATE.
+  // `timeout` is exempt — it is the one transition the deadline itself authorizes.
   const row = getDb()
-    .prepare<ApprovalRequestRow, [string, string | null, string | null, string, string, string]>(
+    .prepare<
+      ApprovalRequestRow,
+      [string, string | null, string | null, string, string, string, string]
+    >(
       `UPDATE approval_requests
        SET status = ?, responses = ?, resolvedBy = ?, resolvedAt = ?, updatedAt = ?
        WHERE id = ? AND status = 'pending'
+         AND (? = 'timeout'
+              OR expiresAt IS NULL
+              OR expiresAt > strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
        RETURNING *`,
     )
     .get(
@@ -11126,6 +11136,7 @@ export function resolveApprovalRequest(
       now,
       now,
       id,
+      data.status,
     );
   return row ? rowToApprovalRequest(row) : null;
 }
@@ -11211,14 +11222,25 @@ export function getApprovalRequestByStepId(stepId: string): ApprovalRequest | nu
   return row ? rowToApprovalRequest(row) : null;
 }
 
-// TODO: Wire into a periodic cron/sweep to auto-timeout expired approval requests (Phase 2)
-export function getExpiredPendingApprovals(): ApprovalRequest[] {
+/**
+ * Pending approval requests whose deadline has passed.
+ *
+ * `standaloneOnly` restricts the result to non-workflow requests — the sweep
+ * (see `sweepExpiredApprovalRequests` in src/http/approval-requests.ts) must not
+ * touch workflow-linked rows, whose expiry is owned by the workflow engine
+ * (`getStuckApprovalRuns` + src/workflows/recovery.ts) so the run gets resumed
+ * on its `timeout` port instead of being left waiting.
+ */
+export function getExpiredPendingApprovals(options?: {
+  standaloneOnly?: boolean;
+}): ApprovalRequest[] {
   const rows = getDb()
     .prepare<ApprovalRequestRow, []>(
       `SELECT * FROM approval_requests
        WHERE status = 'pending'
          AND expiresAt IS NOT NULL
-         AND expiresAt < strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
+         AND expiresAt < strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         ${options?.standaloneOnly ? "AND workflowRunId IS NULL" : ""}`,
     )
     .all();
   return rows.map(rowToApprovalRequest);

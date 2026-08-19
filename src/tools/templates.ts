@@ -110,6 +110,27 @@ Continue your work based on the human's input.`,
   category: "task_lifecycle",
 });
 
+// ============================================================================
+// HITL timeout (created when a standalone approval request expires unanswered)
+// ============================================================================
+
+registerTemplate({
+  eventType: "hitl.timeout",
+  header: "",
+  defaultBody: `Your approval request ({{request_id}}) expired before a human responded.
+
+Title: {{title}}
+Deadline: {{expires_at}}
+
+No human input is coming for this request. Continue without it, or ask again if the answer is still required.`,
+  variables: [
+    { name: "request_id", description: "The approval request ID" },
+    { name: "title", description: "Title of the approval request" },
+    { name: "expires_at", description: "ISO timestamp the request expired at" },
+  ],
+  category: "task_lifecycle",
+});
+
 registerTemplate({
   eventType: "task.worker.failed",
   header: "",
