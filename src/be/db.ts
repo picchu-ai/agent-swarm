@@ -11226,7 +11226,7 @@ export function getApprovalRequestByStepId(stepId: string): ApprovalRequest | nu
  * Pending approval requests whose deadline has passed.
  *
  * `standaloneOnly` restricts the result to non-workflow requests — the sweep
- * (see `sweepExpiredApprovalRequests` in src/http/approval-requests.ts) must not
+ * (see `sweepExpiredApprovalRequests` in src/be/approval-lifecycle.ts) must not
  * touch workflow-linked rows, whose expiry is owned by the workflow engine
  * (`getStuckApprovalRuns` + src/workflows/recovery.ts) so the run gets resumed
  * on its `timeout` port instead of being left waiting.

@@ -19,6 +19,7 @@ import {
   type Server,
   type ServerResponse,
 } from "node:http";
+import { finalizeApprovalRequest, sweepExpiredApprovalRequests } from "../be/approval-lifecycle";
 import {
   type ApprovalRequest,
   closeDb,
@@ -31,11 +32,7 @@ import {
   initDb,
   resolveApprovalRequest,
 } from "../be/db";
-import {
-  finalizeApprovalRequest,
-  handleApprovalRequests,
-  sweepExpiredApprovalRequests,
-} from "../http/approval-requests";
+import { handleApprovalRequests } from "../http/approval-requests";
 import { handleCore } from "../http/core";
 import { getPathSegments, parseQueryParams } from "../http/utils";
 // Registers `hitl.follow_up` / `hitl.timeout` in the prompt-template registry.

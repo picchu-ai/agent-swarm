@@ -1,5 +1,5 @@
+import { sweepExpiredApprovalRequests } from "../be/approval-lifecycle";
 import { getDueWaitStates } from "../be/db";
-import { sweepExpiredApprovalRequests } from "../http/approval-requests";
 import type { ExecutorRegistry } from "./executors/registry";
 import { resumeWaitState } from "./resume";
 
