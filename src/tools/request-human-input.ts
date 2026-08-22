@@ -48,7 +48,10 @@ export const registerRequestHumanInputTool = (server: McpServer) => {
           .int()
           .min(1)
           .optional()
-          .describe("Timeout in seconds (auto-rejects on timeout)"),
+          .describe(
+            "Deadline in seconds. Once it passes, the request is swept to the terminal " +
+              "'timeout' status, late responses are refused, and you get a follow-up task.",
+          ),
       }),
       outputSchema: swarmToolOutputSchema({
         yourAgentId: z.string().optional(),

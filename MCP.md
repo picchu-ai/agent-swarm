@@ -1305,7 +1305,7 @@ Create an approval request that pauses until a human responds. Supports multiple
 |-----------|------|----------|---------|-------------|
 | `title` | `string` | Yes | - | Title of the approval request |
 | `questions` | `array` | Yes | - | Questions to ask the human |
-| `timeoutSeconds` | `number` | No | - | Timeout in seconds (auto-rejects on timeout) |
+| `timeoutSeconds` | `number` | No | - | Deadline in seconds. Once it passes, the request is swept to the terminal 'timeout' status, late responses are refused, and you get a follow-up task. |
 
 ## Skills Tools
 
