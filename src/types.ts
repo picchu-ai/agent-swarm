@@ -634,6 +634,23 @@ export const AgentTaskSchema = z
   .openapi("AgentTask");
 
 // ============================================================================
+// Task context-key groups
+// ============================================================================
+//
+// `contextKey` is the canonical cross-ingress conversation/project key
+// (`project/<name>`, `slack/<channel>`, `task:slack:<channel>:<ts>`, …). This
+// aggregate lets a client group tasks by project without paging the whole task
+// list — the dashboard's sidebar project rail is the first consumer.
+
+export const TaskContextKeyGroupSchema = z.object({
+  contextKey: z.string(),
+  taskCount: z.number().int(),
+  /** Most recent `lastUpdatedAt` across the group's tasks. */
+  lastActivityAt: z.string(),
+});
+export type TaskContextKeyGroupResponse = z.infer<typeof TaskContextKeyGroupSchema>;
+
+// ============================================================================
 // Task Attachments (Phase 1 — pointer-based artifacts)
 // ============================================================================
 //

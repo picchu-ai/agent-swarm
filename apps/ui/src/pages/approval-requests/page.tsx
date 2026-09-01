@@ -1,14 +1,15 @@
-import type { ColDef, RowClickedEvent } from "ag-grid-community";
+import type { ColDef } from "ag-grid-community";
 import { ClipboardCheck } from "lucide-react";
 import { useCallback, useMemo } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useApprovalRequests } from "@/api/hooks/use-approval-requests";
 import type { ApprovalRequest, ApprovalRequestStatus } from "@/api/types";
-import { DataGrid } from "@/components/shared/data-grid";
+import { DataGrid, ignoreRowClickFromInteractives } from "@/components/shared/data-grid";
 import { EmptyState } from "@/components/shared/empty-state";
 import { ListFilterBar } from "@/components/shared/list-filter-bar";
 import { StatusBadge } from "@/components/shared/status-badge";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/ui/page-header";
 import {
   Select,
@@ -161,14 +162,47 @@ export default function ApprovalRequestsPage() {
         getQuickFilterText: () => "",
         valueFormatter: (params) => formatSmartTime(params.value),
       },
+      {
+        // Explicit route to the screen that actually carries the option /
+        // response controls — `/approval-requests/:id`, never `/tasks/:id`.
+        // A real anchor, so it opens in a new tab and is keyboard-reachable.
+        colId: "decide",
+        headerName: "",
+        width: 96,
+        pinned: "right",
+        sortable: false,
+        resizable: false,
+        getQuickFilterText: () => "",
+        cellRenderer: (params: { data: ApprovalRequest | undefined }) => {
+          const request = params.data;
+          if (!request) return null;
+          const pending = request.status === "pending";
+          return (
+            <Button
+              asChild
+              variant={pending ? "default" : "outline"}
+              size="sm"
+              className="h-6 px-2 text-xs"
+            >
+              <Link
+                to={`/approval-requests/${request.id}`}
+                aria-label={`${pending ? "Decide on" : "View"} approval request ${request.title}`}
+              >
+                {pending ? "Decide" : "View"}
+              </Link>
+            </Button>
+          );
+        },
+      },
     ],
     [],
   );
 
-  const onRowClicked = useCallback(
-    (event: RowClickedEvent<ApprovalRequest>) => {
-      if (event.data) navigate(`/approval-requests/${event.data.id}`);
-    },
+  const onRowClicked = useMemo(
+    () =>
+      ignoreRowClickFromInteractives<ApprovalRequest>((event) => {
+        if (event.data) void navigate(`/approval-requests/${event.data.id}`);
+      }),
     [navigate],
   );
   const hasActiveFilters =

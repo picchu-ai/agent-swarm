@@ -685,6 +685,22 @@ export interface TasksResponse {
   total: number;
 }
 
+/**
+ * One `contextKey` bucket from `GET /api/task-context-keys` (≥1.132.0) — the
+ * canonical cross-ingress conversation/project key (`project/<name>`,
+ * `slack/<channel>`, …) with its task count and last activity. Powers the
+ * sidebar project rail, which needs every key rather than the current page's.
+ */
+export interface TaskContextKeyGroup {
+  contextKey: string;
+  taskCount: number;
+  lastActivityAt: string;
+}
+
+export interface TaskContextKeysResponse {
+  contextKeys: TaskContextKeyGroup[];
+}
+
 export interface LogsResponse {
   logs: AgentLog[];
 }

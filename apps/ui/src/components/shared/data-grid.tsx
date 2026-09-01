@@ -276,3 +276,21 @@ export function DataGrid<TData>({
     </div>
   );
 }
+
+// ─── Helper for callers' onRowClicked ────────────────────────────────────────
+
+/**
+ * Wrap your row-click handler with this so clicks on links/buttons inside a
+ * cell don't also trigger row navigation. AG Grid's row handler runs before
+ * React's delegated onClick can `stopPropagation`, so we filter the target
+ * here instead.
+ */
+export function ignoreRowClickFromInteractives<T>(
+  handler: (e: RowClickedEvent<T>) => void,
+): (e: RowClickedEvent<T>) => void {
+  return (e) => {
+    const target = e.event?.target;
+    if (target instanceof Element && target.closest("a, button, [role='menuitem']")) return;
+    handler(e);
+  };
+}

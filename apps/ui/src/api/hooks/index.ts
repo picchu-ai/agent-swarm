@@ -163,6 +163,8 @@ export {
 } from "./use-skills";
 export { useApiVersion, useHealth, useLogs, useStats, useSteeringEnabled } from "./use-stats";
 export { useStatus, useTestConnection } from "./use-status";
+export type { TaskContextKeysOptions } from "./use-task-context-keys";
+export { useTaskContextKeys } from "./use-task-context-keys";
 export type { UseTaskTemplatesOptions } from "./use-task-templates";
 export { useTaskTemplates } from "./use-task-templates";
 export type { SteerTaskInput, TaskFilters } from "./use-tasks";

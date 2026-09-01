@@ -2240,6 +2240,10 @@ export interface TaskFilters {
   requestedByUserId?: string;
   /** When set, restrict to rows where `requestedByUserId` IS NULL. Takes priority over `requestedByUserId`. */
   requestedByUserIdIsNull?: boolean;
+  /** Only return tasks carrying this exact context key. NULL rows are excluded. */
+  contextKey?: string;
+  /** When set, restrict to rows where `contextKey` IS NULL. Takes priority over `contextKey`. */
+  contextKeyIsNull?: boolean;
   /** Sort list rows for either table freshness or timeline paging. */
   orderBy?: "lastUpdatedAt" | "createdAt";
   limit?: number;
@@ -2343,6 +2347,16 @@ export function getAllTasks(
   } else if (filters?.requestedByUserId) {
     conditions.push("requestedByUserId = ?");
     params.push(filters.requestedByUserId);
+  }
+
+  // `contextKey` is the canonical cross-ingress conversation/project key. The
+  // dashboard's project rail filters on it, and needs an explicit "no context
+  // key" bucket — hence the IS NULL variant rather than a magic string.
+  if (filters?.contextKeyIsNull) {
+    conditions.push("contextKey IS NULL");
+  } else if (filters?.contextKey) {
+    conditions.push("contextKey = ?");
+    params.push(filters.contextKey);
   }
 
   // Exclude system/heartbeat tasks by default. The flag is still called
@@ -2481,6 +2495,16 @@ export function getTasksCount(filters?: Omit<TaskFilters, "limit" | "readyOnly">
     params.push(filters.requestedByUserId);
   }
 
+  // `contextKey` is the canonical cross-ingress conversation/project key. The
+  // dashboard's project rail filters on it, and needs an explicit "no context
+  // key" bucket — hence the IS NULL variant rather than a magic string.
+  if (filters?.contextKeyIsNull) {
+    conditions.push("contextKey IS NULL");
+  } else if (filters?.contextKey) {
+    conditions.push("contextKey = ?");
+    params.push(filters.contextKey);
+  }
+
   // Exclude system/heartbeat tasks by default. The flag is still called
   // `includeHeartbeat` for backward compat with existing API callers, but we
   // also gate boot-triage + heartbeat-checklist behind it since those are
@@ -2499,6 +2523,38 @@ export function getTasksCount(filters?: Omit<TaskFilters, "limit" | "readyOnly">
     .get(...params);
 
   return result?.count ?? 0;
+}
+
+/**
+ * One `contextKey` bucket: how many tasks carry it and when the group last
+ * moved. Powers the dashboard's project rail, which needs the full set of keys
+ * across every task — not just the page the task list happens to be showing.
+ *
+ * Heartbeat/boot-triage rows are excluded on the same terms as the task list,
+ * so a rail count always matches the list it links to. Tasks with no context
+ * key are simply absent; the UI renders that bucket from `getTasksCount`.
+ */
+export interface TaskContextKeyGroup {
+  contextKey: string;
+  taskCount: number;
+  lastActivityAt: string;
+}
+
+export function getTaskContextKeyGroups(opts?: {
+  includeHeartbeat?: boolean;
+}): TaskContextKeyGroup[] {
+  const heartbeatClause = opts?.includeHeartbeat
+    ? ""
+    : ` AND (IFNULL(taskType, '') NOT IN ('heartbeat', 'heartbeat-checklist', 'boot-triage') AND tags NOT LIKE '%"heartbeat"%')`;
+  const query = `SELECT contextKey,
+      COUNT(*) AS taskCount,
+      MAX(lastUpdatedAt) AS lastActivityAt
+    FROM agent_tasks
+    WHERE contextKey IS NOT NULL AND contextKey != ''${heartbeatClause}
+    GROUP BY contextKey
+    ORDER BY lastActivityAt DESC`;
+
+  return getDb().prepare<TaskContextKeyGroup, []>(query).all();
 }
 
 /**

@@ -70,7 +70,8 @@ export type TasksTableColumnId =
   | "created"
   | "type"
   | "deps"
-  | "tags";
+  | "tags"
+  | "detail";
 
 // Columns the user can hide via the visibility dropdown. Description+Status
 // stay pinned so the table always has an anchor.
@@ -93,7 +94,10 @@ export const TOGGLEABLE_COLUMNS: { id: TasksTableColumnId; label: string }[] = [
   { id: "tags", label: "Tags" },
 ];
 
-const ALWAYS_VISIBLE: TasksTableColumnId[] = ["description", "status"];
+// `detail` is the row's explicit open affordance. Row-click already navigates,
+// but that is invisible, unreachable by keyboard, and can't be middle-clicked
+// into a new tab — so the anchor is always on, never hideable.
+const ALWAYS_VISIBLE: TasksTableColumnId[] = ["description", "status", "detail"];
 const ALL_COLUMN_IDS: TasksTableColumnId[] = [
   ...ALWAYS_VISIBLE,
   ...TOGGLEABLE_COLUMNS.map((column) => column.id),
@@ -287,6 +291,23 @@ function UserCell({
       <UserCheck className="h-3 w-3 shrink-0 text-muted-foreground" />
       <span className="truncate">{label}</span>
     </Link>
+  );
+}
+
+/**
+ * Explicit "open this task" affordance. A real `<Link>` (so middle-click and
+ * open-in-new-tab work, and the row is reachable by keyboard) styled as a small
+ * outline button. `ignoreRowClickFromInteractives` keeps the click from also
+ * firing the row handler, so the two navigations never stack.
+ */
+function DetailCell({ taskId }: { taskId: string | undefined }) {
+  if (!taskId) return DASH;
+  return (
+    <Button asChild variant="outline" size="sm" className="h-6 px-2 text-xs">
+      <Link to={`/tasks/${taskId}`} aria-label={`Open task ${taskId.slice(0, 8)} detail`}>
+        Detail
+      </Link>
+    </Button>
   );
 }
 
@@ -728,6 +749,18 @@ export function TasksTable({
         sortable: false,
         cellRenderer: (p: { value: string[] | undefined }) => <TagsCell value={p.value} />,
       },
+      {
+        _id: "detail",
+        colId: "detail",
+        headerName: "",
+        width: 84,
+        ...fixed,
+        pinned: "right",
+        sortable: false,
+        resizable: false,
+        getQuickFilterText: () => "",
+        cellRenderer: (p: { data?: AgentTask }) => <DetailCell taskId={p.data?.id} />,
+      },
     ];
 
     return all.filter((c) => !columns.isHidden(c._id)).map(({ _id, ...col }) => col);
@@ -747,20 +780,7 @@ export function TasksTable({
   );
 }
 
-// ─── Helper for callers' onRowClicked ────────────────────────────────────────
-
-/**
- * Wrap your row-click handler with this so clicks on links/buttons inside a
- * cell don't also trigger row navigation. AG Grid's row handler runs before
- * React's delegated onClick can `stopPropagation`, so we filter the target
- * here instead.
- */
-export function ignoreRowClickFromInteractives<T>(
-  handler: (e: RowClickedEvent<T>) => void,
-): (e: RowClickedEvent<T>) => void {
-  return (e) => {
-    const target = e.event?.target;
-    if (target instanceof Element && target.closest("a, button, [role='menuitem']")) return;
-    handler(e);
-  };
-}
+// The row-click guard used to live here; it now sits beside `DataGrid` (its
+// real subject) and is re-exported so existing `tasks-table` imports still
+// resolve. See components/shared/data-grid.tsx.
+export { ignoreRowClickFromInteractives } from "@/components/shared/data-grid";

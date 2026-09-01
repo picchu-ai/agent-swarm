@@ -14599,6 +14599,7 @@ export interface paths {
                     createdBefore?: string;
                     source?: string;
                     requestedByUserId?: string;
+                    contextKey?: string;
                     orderBy?: "lastUpdatedAt" | "createdAt";
                     limit?: number | null;
                     offset?: number | null;
@@ -15501,6 +15502,53 @@ export interface paths {
                 };
             };
         };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/task-context-keys": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List distinct task context keys with counts
+         * @description Aggregates `agent_tasks.contextKey` into one row per key, with a task count and the group's last activity. Intended for grouping/filtering UI (the dashboard project rail) that must see every key, not just the current task-list page. Tasks with no context key are omitted — count them with `GET /api/tasks?contextKey=none`.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    includeHeartbeat?: "true" | "false";
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Context-key groups, most recently active first */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            contextKeys: {
+                                contextKey: string;
+                                taskCount: number;
+                                lastActivityAt: string;
+                            }[];
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;

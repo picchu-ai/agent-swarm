@@ -34,6 +34,11 @@ export interface TaskFilters {
   source?: string[];
   /** Exact requester user id, or the sentinel `none` for unattributed (NULL) rows. */
   requestedByUserId?: string;
+  /**
+   * Phase 1 (≥1.132.0): exact `contextKey`, or the sentinel `none` for tasks
+   * that carry none. Backs the sidebar project rail's filtered task list.
+   */
+  contextKey?: string;
 }
 
 export interface UseTasksOptions {

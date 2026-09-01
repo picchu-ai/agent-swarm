@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Agent Swarm API",
-    "version": "1.131.1",
+    "version": "1.132.0",
     "description": "Multi-agent orchestration API for Claude Code, Codex, and Gemini CLI. Enables task distribution, agent communication, and service discovery.\n\nMCP tools are documented separately in [MCP.md](./MCP.md)."
   },
   "servers": [
@@ -37137,6 +37137,15 @@
           {
             "schema": {
               "type": "string",
+              "minLength": 1
+            },
+            "required": false,
+            "name": "contextKey",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
               "enum": [
                 "lastUpdatedAt",
                 "createdAt"
@@ -38574,6 +38583,73 @@
                     "task",
                     "alreadyFinished",
                     "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/task-context-keys": {
+      "get": {
+        "summary": "List distinct task context keys with counts",
+        "description": "Aggregates `agent_tasks.contextKey` into one row per key, with a task count and the group's last activity. Intended for grouping/filtering UI (the dashboard project rail) that must see every key, not just the current task-list page. Tasks with no context key are omitted — count them with `GET /api/tasks?contextKey=none`.",
+        "tags": [
+          "Tasks"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ]
+            },
+            "required": false,
+            "name": "includeHeartbeat",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Context-key groups, most recently active first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "contextKeys": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "contextKey": {
+                            "type": "string"
+                          },
+                          "taskCount": {
+                            "type": "integer"
+                          },
+                          "lastActivityAt": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "contextKey",
+                          "taskCount",
+                          "lastActivityAt"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "contextKeys"
                   ]
                 }
               }

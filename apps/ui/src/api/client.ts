@@ -111,6 +111,7 @@ import type {
   SwarmConfigsResponse,
   SwarmRepo,
   SwarmReposResponse,
+  TaskContextKeysResponse,
   TaskContextResponse,
   TasksResponse,
   TaskTemplate,
@@ -345,6 +346,8 @@ class ApiClient {
     source?: string[];
     /** Exact requester user id, or the sentinel `none` for unattributed (NULL) rows. */
     requestedByUserId?: string;
+    /** Exact context key, or the sentinel `none` for tasks with no context key. */
+    contextKey?: string;
   }): Promise<TasksResponse> {
     const params = new URLSearchParams();
     if (filters?.status) params.set("status", filters.status);
@@ -362,10 +365,23 @@ class ApiClient {
     if (filters?.source && filters.source.length > 0)
       params.set("source", filters.source.join(","));
     if (filters?.requestedByUserId) params.set("requestedByUserId", filters.requestedByUserId);
+    if (filters?.contextKey) params.set("contextKey", filters.contextKey);
     const queryString = params.toString();
     const url = `${this.getBaseUrl()}/api/tasks${queryString ? `?${queryString}` : ""}`;
     const res = await fetch(url, { headers: this.getHeaders() });
     if (!res.ok) throw new Error(`Failed to fetch tasks: ${res.status}`);
+    return res.json();
+  }
+
+  async fetchTaskContextKeys(filters?: {
+    includeHeartbeat?: boolean;
+  }): Promise<TaskContextKeysResponse> {
+    const params = new URLSearchParams();
+    if (filters?.includeHeartbeat) params.set("includeHeartbeat", "true");
+    const queryString = params.toString();
+    const url = `${this.getBaseUrl()}/api/task-context-keys${queryString ? `?${queryString}` : ""}`;
+    const res = await fetch(url, { headers: this.getHeaders() });
+    if (!res.ok) throw new Error(`Failed to fetch task context keys: ${res.status}`);
     return res.json();
   }
 
