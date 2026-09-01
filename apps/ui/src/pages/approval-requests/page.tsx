@@ -201,7 +201,7 @@ export default function ApprovalRequestsPage() {
   const onRowClicked = useMemo(
     () =>
       ignoreRowClickFromInteractives<ApprovalRequest>((event) => {
-        if (event.data) navigate(`/approval-requests/${event.data.id}`);
+        if (event.data) void navigate(`/approval-requests/${event.data.id}`);
       }),
     [navigate],
   );
