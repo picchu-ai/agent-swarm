@@ -549,6 +549,59 @@ RUN HOME=/root NPM_CONFIG_CACHE=/tmp/npm-cache \
     && rm -rf /tmp/npm-cache /root/.npm /root/.cache \
     && chmod -R a+rX /opt/playwright
 
+# Chrome for Testing (CFT) — a real Chrome, distinct from the Playwright
+# chromium installed above, because the `playwright` and `chrome-devtools` MCP
+# servers cannot use that chromium:
+#   * chrome-devtools-mcp resolves the stable channel through Puppeteer, which
+#     probes exactly ONE path on Linux — /opt/google/chrome/chrome — and fails
+#     with "Could not find Google Chrome executable for channel 'stable'"
+#     otherwise. It reads no CHROME_PATH/PUPPETEER_EXECUTABLE_PATH override.
+#   * Playwright's `chrome` channel probes the same absolute path.
+# So discovery is by canonical path, not by env var: CFT is unpacked under
+# /opt/chrome-for-testing and /opt/google/chrome is a symlink onto it.
+#
+# This has to live in the image: the worker runs unprivileged with no sudo, so
+# a runtime `npx ... install-browser` neither survives a restart nor can set up
+# the setuid sandbox helper below.
+#
+# Sandbox: unprivileged user namespaces are blocked by Docker's seccomp
+# profile, so Chrome's namespace sandbox is unavailable and it aborts with
+# "No usable sandbox!". CFT ships the SUID helper; Chrome looks for it as
+# `chrome-sandbox` next to the binary and requires root:root mode 4755. Doing
+# that here is what lets the MCP servers run WITH the sandbox on, so no caller
+# has to pass --no-sandbox. The build-time smoke test still passes
+# --no-sandbox: the RUN executes as root, and Chrome refuses to run as root
+# with a sandbox at all. The sandbox setup is therefore asserted structurally
+# (root:root 4755) rather than exercised.
+#
+# amd64 only: Chrome for Testing publishes no linux-arm64 build. arm64 images
+# keep the Playwright chromium above and simply ship without CFT.
+ARG CHROME_FOR_TESTING_VERSION=152.0.7977.64
+RUN if [ "${TARGETARCH}" != "amd64" ]; then \
+      echo "Skipping Chrome for Testing: no linux-arm64 build published (TARGETARCH=${TARGETARCH})"; \
+    else \
+      cft_dir=/opt/chrome-for-testing/chrome-linux64 \
+      && curl -fsSL -o /tmp/cft.zip \
+           "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_FOR_TESTING_VERSION}/linux64/chrome-linux64.zip" \
+      && mkdir -p /opt/chrome-for-testing \
+      && unzip -q /tmp/cft.zip -d /opt/chrome-for-testing \
+      && rm /tmp/cft.zip \
+      && chmod -R a+rX /opt/chrome-for-testing \
+      && cp "$cft_dir/chrome_sandbox" "$cft_dir/chrome-sandbox" \
+      && chown root:root "$cft_dir/chrome-sandbox" \
+      && chmod 4755 "$cft_dir/chrome-sandbox" \
+      && mkdir -p /opt/google \
+      && ln -sfn "$cft_dir" /opt/google/chrome \
+      && ln -sf "$cft_dir/chrome" /usr/local/bin/google-chrome \
+      && ln -sf "$cft_dir/chrome" /usr/local/bin/google-chrome-stable \
+      && ldd /opt/google/chrome/chrome > /tmp/cft-ldd.txt \
+      && ! grep -F "not found" /tmp/cft-ldd.txt \
+      && [ "$(stat -c '%U:%G %a' "$cft_dir/chrome-sandbox")" = "root:root 4755" ] \
+      && cd /opt/global-deps-full \
+      && HOME=/root node -e 'const { chromium } = require("playwright"); (async () => { const browser = await chromium.launch({ headless: true, executablePath: "/opt/google/chrome/chrome", args: ["--no-sandbox"] }); const page = await browser.newPage(); await page.setContent("<main>chrome-for-testing smoke ok</main>"); if (await page.textContent("main") !== "chrome-for-testing smoke ok") throw new Error("unexpected page content"); await browser.close(); })().catch((error) => { console.error(error); process.exit(1); });' \
+      && rm -rf /tmp/cft-ldd.txt /root/.cache /root/.config; \
+    fi
+
 # Install the context-mode plugins for Claude + Codex (build-time cache).
 # These are the ONLY marketplace plugins — they ship the ctx_* HOOKS, which a
 # skills-only installer cannot replace. NOTE: the Claude plugin tracks the
