@@ -71,6 +71,83 @@ export async function readIdentityBaselines(
     return null;
   }
 }
+
+/**
+ * Re-record baselines for identity files that were just (re)written from DB
+ * content mid-session — i.e. content the agent did NOT author.
+ *
+ * Without this, `update-profile` writing `/workspace/TOOLS.md` leaves the file
+ * differing from its boot-time baseline, so session-end sync treats DB content
+ * the agent never touched as an agent edit and POSTs it straight back. The
+ * result is a `api` → `session_sync` version ping-pong on every session for
+ * agents whose profile is edited from the DB side.
+ *
+ * `written` maps baseline field names (`toolsMd`, …) to the raw content that
+ * landed on disk. No-op when nothing was written, so this stays neutral for the
+ * majority of agents that never rewrite these files.
+ */
+export async function rebaselineIdentityFiles(
+  written: Record<string, string | undefined>,
+  io: {
+    readFile?: FileReader;
+    writeBaselines?: (baselines: IdentityBaselines) => Promise<void>;
+  } = {},
+): Promise<void> {
+  const entries = Object.entries(written).filter(
+    (entry): entry is [string, string] => entry[1] !== undefined,
+  );
+  if (entries.length === 0) return;
+
+  const baselines = (await readIdentityBaselines(io.readFile ?? readFileIfExists)) ?? {};
+  for (const [field, content] of entries) baselines[field] = contentSha256(content);
+  await (io.writeBaselines ?? writeIdentityBaselines)(baselines);
+}
+/** One identity file the runner materializes from a DB field. */
+export interface IdentityFileChange {
+  /** Baseline / profile field name, e.g. `toolsMd`. */
+  field: string;
+  /** Workspace path the field is materialized to. */
+  path: string;
+  /** The DB content that should now be on disk. */
+  content: string;
+}
+
+/**
+ * Pure: which materialized identity files does a freshly-fetched profile
+ * disagree with? Used by the runner's per-task profile refresh.
+ *
+ * An absent or empty incoming field yields no change: the in-memory value may
+ * be a generated default that was never persisted server-side, and dropping it
+ * would strip the agent's identity from the system prompt.
+ */
+export function diffIdentityProfile(
+  incoming: Record<string, string | undefined>,
+  current: Record<string, string | undefined>,
+  paths: Record<string, string>,
+): IdentityFileChange[] {
+  const changes: IdentityFileChange[] = [];
+  for (const [field, path] of Object.entries(paths)) {
+    const next = incoming[field];
+    if (next && next !== current[field]) changes.push({ field, path, content: next });
+  }
+  return changes;
+}
+
+/**
+ * Pure: may the runner overwrite a materialized identity file with fresh DB
+ * content? Only when the on-disk copy still hashes to its recorded baseline —
+ * a file that no longer matches carries an in-flight agent edit that has not
+ * been synced back yet (non-Claude harnesses only sync at session end), so
+ * overwriting it would silently drop that edit. An absent file is always safe.
+ */
+export function canRefreshIdentityFile(
+  onDisk: string | undefined,
+  baseline: string | undefined,
+): boolean {
+  if (onDisk === undefined) return true;
+  return baseline !== undefined && contentSha256(onDisk) === baseline;
+}
+
 /**
  * Claude Code's personal-file CLAUDE.md path. This is what the Claude plugin
  * Stop hook reads and owns — the runner only uses it as a backstop for an

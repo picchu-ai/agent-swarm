@@ -67,9 +67,15 @@ import { validateJsonSchema } from "../workflows/json-schema-validator.ts";
 import { buildContextPreamble, buildResumeContextPreamble } from "./context-preamble.ts";
 import { awaitCredentials, BootMaxWaitExceededError, EX_CONFIG } from "./credential-wait.ts";
 import {
+  canRefreshIdentityFile,
   contentSha256,
+  diffIdentityProfile,
+  HEARTBEAT_MD_PATH,
+  type IdentityBaselines,
   resolveClaudeMdPath,
   syncProfileFilesToServer,
+  TOOLS_MD_PATH,
+  WORKSPACE_CLAUDE_MD_PATH,
   writeIdentityBaselines,
   writeProfileFileFromDb,
 } from "./profile-sync.ts";
@@ -5116,6 +5122,16 @@ export async function runAgent(config: RunnerConfig, opts: RunnerOptions) {
   const SOUL_MD_PATH = "/workspace/SOUL.md";
   const IDENTITY_MD_PATH = "/workspace/IDENTITY.md";
 
+  // Profile field → workspace path, for the per-task refresh below. Mirrors the
+  // materialization order used at boot.
+  const IDENTITY_FILE_PATHS: Record<string, string> = {
+    soulMd: SOUL_MD_PATH,
+    identityMd: IDENTITY_MD_PATH,
+    toolsMd: TOOLS_MD_PATH,
+    heartbeatMd: HEARTBEAT_MD_PATH,
+    claudeMd: WORKSPACE_CLAUDE_MD_PATH,
+  };
+
   if (agentSoulMd) {
     try {
       const backupPath = await writeProfileFileFromDb(SOUL_MD_PATH, agentSoulMd);
@@ -5151,7 +5167,7 @@ export async function runAgent(config: RunnerConfig, opts: RunnerOptions) {
   // Write TOOLS.md to workspace (agent can edit during session)
   if (agentToolsMd) {
     try {
-      const backupPath = await writeProfileFileFromDb("/workspace/TOOLS.md", agentToolsMd);
+      const backupPath = await writeProfileFileFromDb(TOOLS_MD_PATH, agentToolsMd);
       if (backupPath) console.warn(`[${role}] Archived differing TOOLS.md at ${backupPath}`);
       console.log(`[${role}] Wrote TOOLS.md to workspace`);
     } catch (err) {
@@ -5162,7 +5178,7 @@ export async function runAgent(config: RunnerConfig, opts: RunnerOptions) {
   // Write HEARTBEAT.md to workspace (lead's periodic checklist)
   if (agentHeartbeatMd) {
     try {
-      const backupPath = await writeProfileFileFromDb("/workspace/HEARTBEAT.md", agentHeartbeatMd);
+      const backupPath = await writeProfileFileFromDb(HEARTBEAT_MD_PATH, agentHeartbeatMd);
       if (backupPath) console.warn(`[${role}] Archived differing HEARTBEAT.md at ${backupPath}`);
       console.log(`[${role}] Wrote HEARTBEAT.md to workspace`);
     } catch (err) {
@@ -5173,7 +5189,7 @@ export async function runAgent(config: RunnerConfig, opts: RunnerOptions) {
   // Write CLAUDE.md to workspace (agent-level instructions)
   if (agentClaudeMd) {
     try {
-      const backupPath = await writeProfileFileFromDb("/workspace/CLAUDE.md", agentClaudeMd);
+      const backupPath = await writeProfileFileFromDb(WORKSPACE_CLAUDE_MD_PATH, agentClaudeMd);
       if (backupPath) console.warn(`[${role}] Archived differing CLAUDE.md at ${backupPath}`);
       console.log(`[${role}] Wrote CLAUDE.md to workspace`);
     } catch (err) {
@@ -5184,19 +5200,106 @@ export async function runAgent(config: RunnerConfig, opts: RunnerOptions) {
   // Record baseline hashes of identity files as written from DB. Session-end
   // sync compares current file content against these baselines: unchanged files
   // are skipped, which prevents clobbering DB-side edits made by Lead via
-  // update-profile during the running session.
+  // update-profile during the running session. Kept in memory too so the
+  // per-task refresh below can re-record a field it re-materializes.
+  const identityBaselines: IdentityBaselines = {};
   try {
-    const baselines: Record<string, string> = {};
-    if (agentSoulMd) baselines.soulMd = contentSha256(agentSoulMd);
-    if (agentIdentityMd) baselines.identityMd = contentSha256(agentIdentityMd);
-    if (agentToolsMd) baselines.toolsMd = contentSha256(agentToolsMd);
-    if (agentHeartbeatMd) baselines.heartbeatMd = contentSha256(agentHeartbeatMd);
-    if (agentClaudeMd) baselines.claudeMd = contentSha256(agentClaudeMd);
-    await writeIdentityBaselines(baselines);
+    if (agentSoulMd) identityBaselines.soulMd = contentSha256(agentSoulMd);
+    if (agentIdentityMd) identityBaselines.identityMd = contentSha256(agentIdentityMd);
+    if (agentToolsMd) identityBaselines.toolsMd = contentSha256(agentToolsMd);
+    if (agentHeartbeatMd) identityBaselines.heartbeatMd = contentSha256(agentHeartbeatMd);
+    if (agentClaudeMd) identityBaselines.claudeMd = contentSha256(agentClaudeMd);
+    await writeIdentityBaselines(identityBaselines);
     console.log(`[${role}] Recorded identity file baselines for session-end sync`);
   } catch {
     // Non-fatal — worst case, session-end sync proceeds as before (blind overwrite)
   }
+
+  /**
+   * Re-fetch the agent's identity profile from the API.
+   *
+   * The identity fields above were assigned exactly once, at boot. Since
+   * `docker-entrypoint.sh` `exec`s the runner (process lifetime == container
+   * lifetime), a Lead coaching edit — or the agent's own `update-profile` call
+   * — only reached the model after a container restart. Called per task, right
+   * before the system prompt is rebuilt, so a profile change lands on the very
+   * next task instead of the next reboot.
+   *
+   * A missing or empty field keeps the boot-time value: it may be a generated
+   * default that was never persisted server-side. Non-fatal — any failure
+   * leaves the boot-time identity in place.
+   */
+  const refreshAgentProfile = async (): Promise<void> => {
+    let profile: {
+      soulMd?: string;
+      identityMd?: string;
+      toolsMd?: string;
+      heartbeatMd?: string;
+      claudeMd?: string;
+      name?: string;
+      description?: string;
+    };
+    try {
+      const resp = await fetch(`${apiUrl}/me`, {
+        headers: { Authorization: `Bearer ${apiKey}`, "X-Agent-ID": agentId },
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!resp.ok) return;
+      profile = (await resp.json()) as typeof profile;
+    } catch (err) {
+      console.warn(
+        `[${role}] Profile refresh failed, keeping boot-time identity: ${(err as Error).message}`,
+      );
+      return;
+    }
+
+    agentProfileName = profile.name || agentProfileName;
+    agentDescription = profile.description || agentDescription;
+
+    const changed = diffIdentityProfile(
+      profile,
+      {
+        soulMd: agentSoulMd,
+        identityMd: agentIdentityMd,
+        toolsMd: agentToolsMd,
+        heartbeatMd: agentHeartbeatMd,
+        claudeMd: agentClaudeMd,
+      },
+      IDENTITY_FILE_PATHS,
+    );
+    if (changed.length === 0) return;
+
+    // The in-memory values feed the system prompt, so they follow the DB
+    // unconditionally — even when the file itself is left alone below.
+    for (const { field, content } of changed) {
+      if (field === "soulMd") agentSoulMd = content;
+      else if (field === "identityMd") agentIdentityMd = content;
+      else if (field === "toolsMd") agentToolsMd = content;
+      else if (field === "heartbeatMd") agentHeartbeatMd = content;
+      else if (field === "claudeMd") agentClaudeMd = content;
+    }
+
+    for (const { field, path, content } of changed) {
+      try {
+        const file = Bun.file(path);
+        const onDisk = (await file.exists()) ? await file.text() : undefined;
+        if (!canRefreshIdentityFile(onDisk, identityBaselines[field])) continue;
+        await Bun.write(path, content);
+        identityBaselines[field] = contentSha256(content);
+      } catch (err) {
+        console.warn(`[${role}] Could not refresh ${path}: ${(err as Error).message}`);
+      }
+    }
+    try {
+      await writeIdentityBaselines(identityBaselines);
+    } catch {
+      // Non-fatal — session-end sync falls back to comparing against the
+      // on-disk baseline file as it stood before this refresh.
+    }
+    console.log(
+      `[${role}] Refreshed agent profile from DB: ${changed.map((c) => c.field).join(", ")}`,
+    );
+  };
 
   // ========== Boot-time skill load (signature-gated, replaces the standalone
   // skill-fetch + FS sync blocks). The polling loop below calls the same
@@ -5887,6 +5990,10 @@ export async function runAgent(config: RunnerConfig, opts: RunnerOptions) {
             );
           }
         }
+
+        // Per-task identity refresh — picks up SOUL/IDENTITY/TOOLS/CLAUDE.md
+        // edits made from the DB side since boot (see `refreshAgentProfile`).
+        await refreshAgentProfile();
 
         // Rebuild system prompt with per-task repo context
         const taskBasePrompt = await buildSystemPrompt();

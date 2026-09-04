@@ -3,14 +3,17 @@ import {
   buildIdentityPayload,
   buildIndependentIdentityPayloads,
   CLAUDE_MD_PATH,
+  canRefreshIdentityFile,
   collectProfilePayloads,
   contentSha256,
+  diffIdentityProfile,
   extractSetupScriptContent,
   type FileReader,
   IDENTITY_BASELINES_PATH,
   IDENTITY_MD_PATH,
   type IdentityBaselines,
   postProfileUpdate,
+  rebaselineIdentityFiles,
   resolveClaudeMdPath,
   SETUP_SCRIPT_PATH,
   SOUL_MD_PATH,
@@ -526,5 +529,130 @@ describe("buildIndependentIdentityPayloads", () => {
         body: { heartbeatMd: "ungated edit", changeSource: "session_sync" },
       },
     ]);
+  });
+});
+
+// `update-profile` writing /workspace/*.md mid-session left those files
+// differing from their boot baseline, so session-end sync treated DB content
+// the agent never authored as an agent edit and POSTed it straight back —
+// an `api` → `session_sync` version ping-pong every session. Re-recording the
+// baseline at the point of write closes the loop at the source.
+describe("rebaselineIdentityFiles", () => {
+  const fakeReader =
+    (files: Record<string, string>): FileReader =>
+    async (path: string) =>
+      files[path];
+
+  const fakeIo = (stored: string | undefined) => {
+    const written: IdentityBaselines[] = [];
+    return {
+      written,
+      io: {
+        readFile: (async (path: string) =>
+          path === IDENTITY_BASELINES_PATH ? stored : undefined) as FileReader,
+        writeBaselines: async (b: IdentityBaselines) => {
+          written.push(b);
+        },
+      },
+    };
+  };
+
+  test("re-records the baseline for a field written from the DB side", async () => {
+    const { written, io } = fakeIo(
+      JSON.stringify({ soulMd: "soul-hash", toolsMd: contentSha256("old tools") }),
+    );
+
+    await rebaselineIdentityFiles({ toolsMd: "new tools" }, io);
+
+    expect(written).toHaveLength(1);
+    expect(written[0].toolsMd).toBe(contentSha256("new tools"));
+    // Untouched fields keep their boot-time baseline.
+    expect(written[0].soulMd).toBe("soul-hash");
+  });
+
+  test("the re-recorded baseline makes session-end sync skip the field", async () => {
+    const { written, io } = fakeIo(JSON.stringify({ toolsMd: contentSha256("old tools") }));
+    await rebaselineIdentityFiles({ toolsMd: "lead's new tools" }, io);
+
+    const payloads = await collectProfilePayloads(
+      ["identity"],
+      "session_sync",
+      fakeReader({
+        [TOOLS_MD_PATH]: "lead's new tools",
+        [IDENTITY_BASELINES_PATH]: JSON.stringify(written[0]),
+      }),
+    );
+
+    expect(payloads).toHaveLength(0);
+  });
+
+  test("is a no-op when no identity file was written (neutral for most agents)", async () => {
+    const { written, io } = fakeIo(JSON.stringify({ toolsMd: "boot-hash" }));
+
+    await rebaselineIdentityFiles({ soulMd: undefined, toolsMd: undefined }, io);
+
+    expect(written).toHaveLength(0);
+  });
+
+  test("creates a partial baseline map when none exists yet", async () => {
+    const { written, io } = fakeIo(undefined);
+
+    await rebaselineIdentityFiles({ heartbeatMd: "checklist" }, io);
+
+    expect(written[0]).toEqual({ heartbeatMd: contentSha256("checklist") });
+  });
+});
+
+// The runner assigned the identity fields exactly once, at boot, and the
+// entrypoint `exec`s it — so "runner process lifetime" == "container
+// lifetime" and a TOOLS.md edit only reached the model after a restart.
+// These back the per-task refresh that closes that gap.
+describe("diffIdentityProfile (per-task profile refresh)", () => {
+  const paths = { soulMd: SOUL_MD_PATH, toolsMd: TOOLS_MD_PATH };
+
+  test("reports only the fields the DB now disagrees with", () => {
+    expect(
+      diffIdentityProfile(
+        { soulMd: "same", toolsMd: "new rules" },
+        { soulMd: "same", toolsMd: "old rules" },
+        paths,
+      ),
+    ).toEqual([{ field: "toolsMd", path: TOOLS_MD_PATH, content: "new rules" }]);
+  });
+
+  test("an absent or empty incoming field keeps the in-memory value", () => {
+    // A generated default that was never persisted must not be wiped by a
+    // profile response that omits the field.
+    expect(
+      diffIdentityProfile(
+        { soulMd: undefined, toolsMd: "" },
+        { soulMd: "generated", toolsMd: "generated" },
+        paths,
+      ),
+    ).toEqual([]);
+  });
+
+  test("materializes a field the runner has no value for yet", () => {
+    expect(diffIdentityProfile({ toolsMd: "fresh" }, {}, paths)).toEqual([
+      { field: "toolsMd", path: TOOLS_MD_PATH, content: "fresh" },
+    ]);
+  });
+});
+
+describe("canRefreshIdentityFile (never clobber an in-flight agent edit)", () => {
+  test("allows the rewrite when the file still matches its baseline", () => {
+    expect(canRefreshIdentityFile("boot content", contentSha256("boot content"))).toBe(true);
+  });
+
+  test("refuses when the agent edited the file this session", () => {
+    expect(canRefreshIdentityFile("agent's edit", contentSha256("boot content"))).toBe(false);
+  });
+
+  test("refuses when there is no baseline to vouch for the on-disk content", () => {
+    expect(canRefreshIdentityFile("unknown provenance", undefined)).toBe(false);
+  });
+
+  test("allows the write when the file does not exist", () => {
+    expect(canRefreshIdentityFile(undefined, undefined)).toBe(true);
   });
 });
