@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod";
 import { getAgentById, updateAgentProfile } from "@/be/db";
+import { rebaselineIdentityFiles } from "@/commands/profile-sync";
 import { can } from "@/rbac";
 import { createToolRegistrar, swarmToolOutputSchema, toolErr, toolOk } from "@/tools/utils";
 import { type Agent, AgentAvatarSchema, AgentStatusSchema, ProviderNameSchema } from "@/types";
@@ -344,6 +345,16 @@ export const registerUpdateProfileTool = (server: McpServer) => {
             } catch {
               /* ignore */
             }
+          }
+
+          // These files now hold DB content the agent did not author. Re-record
+          // their baselines so the session-end FS→DB sync recognises them as
+          // untouched instead of echoing them back as a `session_sync` version.
+          // (`start-up.sh` has no baseline — it is diffed by marker, not hash.)
+          try {
+            await rebaselineIdentityFiles({ soulMd, identityMd, toolsMd, heartbeatMd });
+          } catch {
+            /* ignore — worst case the session-end sync re-posts identical content */
           }
         }
 
