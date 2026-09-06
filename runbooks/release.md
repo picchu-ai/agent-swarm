@@ -27,7 +27,7 @@ Merging to `main` does the rest (see [What happens on merge](#what-happens-on-me
 
 | Step | Command it runs | Regenerates | Gated by |
 |---|---|---|---|
-| Helm chart sync | `sync-chart-version` | `charts/agent-swarm/Chart.yaml` (`version` + `appVersion`) | `helm-publish.yml` (`check-chart-version`), `docker-and-deploy.yml` (`sync-chart-version --check`) |
+| Helm chart sync | `sync-chart-version` | `charts/agent-swarm/Chart.yaml` (`version` + `appVersion`) | `helm-publish.yml` (`check-chart-version`), `docker-and-deploy.yml` on version-changing releases (`sync-chart-version --check`) |
 | OpenAPI + docs | `docs:openapi` | `openapi.json` + `docs-site/content/docs/api-reference/**` | `merge-gate.yml` (`OpenAPI Spec Freshness Check`) |
 
 It does **not** stage or commit anything — it regenerates and reports. Commit the listed files yourself alongside the version bump.
@@ -36,12 +36,12 @@ It does **not** stage or commit anything — it regenerates and reports. Commit 
 
 ## What happens on merge
 
-`.github/workflows/docker-and-deploy.yml` runs on every push to `main`. Its `detect-version-change` job compares `package.json`'s `version` against the previous commit. **If — and only if — the version changed**, these jobs fire (each is idempotent and skips if the artifact already exists):
+`.github/workflows/docker-and-deploy.yml` runs on every qualifying push to `main`. Its `detect-version-change` job compares `package.json`'s `version` against the previous commit. Every qualifying non-release run builds and publishes the server, worker-full, and worker-slim images with `latest` and `sha-*` tags. The canonical `desplega-ai/agent-swarm` repository then deploys them; forks skip the `Deploy` job so their host rollout remains an explicit operator action. The chart/agent-fs sync check runs only when the package version changed, so release consistency cannot block an ordinary image rebuild.
+
+**If — and only if — the version changed**, the manifests also receive the version tag and these release-only jobs fire (each is idempotent and skips if the artifact already exists):
 
 | Job | Output |
 |---|---|
-| `build-and-push-server-*` + manifest | `ghcr.io/desplega-ai/agent-swarm:<version>` (amd64 + arm64) |
-| `build-and-push-worker-*` + manifest | `ghcr.io/desplega-ai/agent-swarm-worker:<version>` (amd64 + arm64) |
 | `publish-e2b-templates` | E2B release templates (`agent-swarm-api-<slug>`, worker/lead runtime) |
 | `create-git-tag` | Pushes git tag `v<version>` |
 | `publish-npm` | `@desplega.ai/agent-swarm@<version>` on npm (with provenance; skips if already published) |
@@ -49,7 +49,7 @@ It does **not** stage or commit anything — it regenerates and reports. Commit 
 
 The Helm chart is published separately by `helm-publish.yml` when `charts/agent-swarm/Chart.yaml`'s `version` changes — which is exactly what `sync-chart-version` (and thus `prepare-release`) updates.
 
-If you push to `main` **without** a version change, none of the publish jobs run — Docker images still build/deploy but aren't tagged with a release version. So a release is opt-in: it's defined by the `package.json` version bump.
+If you push to `main` **without** a version change, the Docker images still build and publish (and the canonical repository deploys them), but receive no release-version tag and the npm/E2B/tag/GitHub-release jobs do not run. So a release is opt-in: it's defined by the `package.json` version bump.
 
 ### Swarm Cloud image-release callback
 
