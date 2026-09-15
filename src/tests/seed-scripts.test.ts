@@ -15,6 +15,9 @@ import opsCatalogAudit, {
   renderPage as renderOpsCatalogAuditPage,
 } from "../be/seed-scripts/catalog/ops-catalog-audit";
 import taskContextGathering from "../be/seed-scripts/catalog/task-context-gathering";
+import taskFailureAudit, {
+  argsSchema as taskFailureAuditArgsSchema,
+} from "../be/seed-scripts/catalog/task-failure-audit";
 import { extractScriptSignature } from "../scripts-runtime/extract-signature";
 import { validateScriptImports } from "../scripts-runtime/import-allowlist";
 
@@ -140,6 +143,143 @@ describe("seed-scripts catalog", () => {
     });
   });
 
+  test("task-failure-audit hydrates slim rows before grouping by reason", async () => {
+    const reasons = new Map([
+      ["spawn-1", "Spawn failed: Failed to create opencode session"],
+      ["spawn-2", "Spawn failed: Failed to create opencode session"],
+      ["loop-1", "tool-loop: Detected ping-pong loop"],
+    ]);
+    const requestedTaskIds: string[] = [];
+
+    const result = await taskFailureAudit(
+      { days: 2, limit: 25, groupBy: "reason", publishPage: false },
+      {
+        swarm: {
+          async task_list(args: Record<string, unknown>) {
+            expect(args).toMatchObject({ status: "failed", limit: 25 });
+            expect(new Date(String(args.createdAfter)).toISOString()).toBe(args.createdAfter);
+            return {
+              data: {
+                tasks: Array.from(reasons.keys(), (id) => ({ id, agentId: "agent-1" })),
+              },
+            };
+          },
+          async task_get({ taskId }: { taskId: string }) {
+            requestedTaskIds.push(taskId);
+            return {
+              id: taskId,
+              task: "Full task instructions",
+              failureReason: reasons.get(taskId),
+            };
+          },
+        },
+      },
+    );
+
+    expect(requestedTaskIds.sort()).toEqual(Array.from(reasons.keys()).sort());
+    expect(result.totalFailed).toBe(3);
+    expect(result.groups).toEqual([
+      {
+        key: "spawn failed: failed to create opencode session",
+        count: 2,
+        taskIds: ["spawn-1", "spawn-2"],
+        sampleReason: "Spawn failed: Failed to create opencode session",
+      },
+      {
+        key: "tool-loop: detected ping-pong loop",
+        count: 1,
+        taskIds: ["loop-1"],
+        sampleReason: "tool-loop: Detected ping-pong loop",
+      },
+    ]);
+    expect(result.groups.some((group: { key: string }) => group.key === "(no reason given)")).toBe(
+      false,
+    );
+  });
+
+  test("task-failure-audit distinguishes partial hydration failures from a real missing reason", async () => {
+    const result = await taskFailureAudit(
+      { groupBy: "reason", publishPage: false },
+      {
+        swarm: {
+          async task_list() {
+            return { data: { tasks: [{ id: "missing" }, { id: "unavailable" }] } };
+          },
+          async task_get({ taskId }: { taskId: string }) {
+            if (taskId === "unavailable") throw new Error("temporary read failure");
+            return { data: { id: taskId } };
+          },
+        },
+      },
+    );
+
+    expect(result.groups).toEqual([
+      { key: "(no reason given)", count: 1, taskIds: ["missing"], sampleReason: "" },
+      {
+        key: "(reason unavailable: task_get failed)",
+        count: 1,
+        taskIds: ["unavailable"],
+        sampleReason: "",
+      },
+    ]);
+  });
+
+  test("task-failure-audit bounds reason hydration concurrency", async () => {
+    let active = 0;
+    let peak = 0;
+    const tasks = Array.from({ length: 21 }, (_, index) => ({ id: `failed-${index}` }));
+
+    await taskFailureAudit(
+      { groupBy: "reason", publishPage: false },
+      {
+        swarm: {
+          async task_list() {
+            return { data: { tasks } };
+          },
+          async task_get({ taskId }: { taskId: string }) {
+            active++;
+            peak = Math.max(peak, active);
+            await Bun.sleep(1);
+            active--;
+            return { data: { id: taskId, failureReason: "same failure" } };
+          },
+        },
+      },
+    );
+
+    expect(peak).toBe(10);
+  });
+
+  test("task-failure-audit leaves agent grouping on slim rows and documents its arguments", async () => {
+    let hydrationCalls = 0;
+    const result = await taskFailureAudit(
+      { days: 3, limit: 2, groupBy: "agent", publishPage: false },
+      {
+        swarm: {
+          async task_list(args: Record<string, unknown>) {
+            expect(args.limit).toBe(2);
+            expect(typeof args.createdAfter).toBe("string");
+            return { data: { tasks: [{ id: "one", agentId: "agent-a" }, { id: "two" }] } };
+          },
+          async task_get() {
+            hydrationCalls++;
+            return { data: {} };
+          },
+        },
+      },
+    );
+
+    expect(hydrationCalls).toBe(0);
+    expect(result.groups).toEqual([
+      { key: "agent-a", count: 1, taskIds: ["one"], sampleReason: "" },
+      { key: "(unassigned)", count: 1, taskIds: ["two"], sampleReason: "" },
+    ]);
+    expect(
+      taskFailureAuditArgsSchema.safeParse({ days: 2, limit: 25, groupBy: "reason" }).success,
+    ).toBe(true);
+    expect(taskFailureAuditArgsSchema.shape.hours).toBeUndefined();
+  });
+
   test("scriptsSeeder declares the script kind and one item per catalog entry", async () => {
     expect(scriptsSeeder.kind).toBe("script");
     const items = await scriptsSeeder.items();
@@ -179,7 +319,7 @@ describe("seed-scripts catalog", () => {
 
   test("a user-modified script is preserved, not overwritten, on re-seed", async () => {
     // Simulate a user editing one seeded script's source upstream.
-    const target = SEED_SCRIPTS[0];
+    const target = SEED_SCRIPTS.find((script) => script.name === "task-failure-audit")!;
     const userSource = `${target.source}\n// edited by a user\n`;
     await upsertScriptByName({
       name: target.name,
