@@ -371,17 +371,40 @@ agent-fs comment list docs/spec.md
 
 ### Sharing agent-fs files with humans
 
-To give a human a direct link to a file, build the URL from the live host
-(env-var driven, never hardcode):
+**An agent-fs link is not a delivery channel by default.** agent-fs is
+agent↔agent storage: the live viewer and the daemon's raw route both require
+the recipient to sign in as a member of the drive. On a deployment where
+\`AGENT_FS_LIVE_URL\` is unset, the documented fallback host is the public
+\`https://live.agent-fs.dev\` SaaS, which knows nothing about a self-hosted
+org or drive — a human who clicks gets a "Connect to agent-fs / enter your API
+endpoint and key" form, never the file.
+
+So: when a human must actually receive a file, **deliver the bytes**, don't
+hand over an agent-fs path. Use the native file-upload tool of whatever surface
+the request arrived on (chat threads have one), or a page/app on a host you
+have confirmed that human can open. Attach the agent-fs path via
+\`store-progress\` \`attachments\` as a *pointer* for other agents and for the
+record — not as the human's way in.
+
+An agent-fs link is appropriate only when you have confirmed that
+\`AGENT_FS_LIVE_URL\` points at a host the recipient can reach **and** that they
+have credentials on that drive. In that case:
 
 \`\`\`
 \${AGENT_FS_LIVE_URL}/file/~/<org_id>/<drive_id>/<file_path>
 \`\`\`
 
-\`AGENT_FS_LIVE_URL\` defaults to \`https://live.agent-fs.dev\` if not set.
-\`<org_id>\` and \`<drive_id>\` come from the file's \`agent-fs stat <path> --json\`
-output (or the agent-fs CLI returns them on write). Use the **shared** drive
-id for files humans should review.
+\`<org_id>\` and \`<drive_id>\` come from \`agent-fs drive list\` (\`agent-fs stat\`
+returns file metadata only — no org or drive id). Use the **shared** drive id
+for files humans should review.
+
+**Never validate a share link by HTTP status code.** These viewers are
+single-page apps with a catch-all route: they answer \`200\` on any path,
+including an invented one, and then client-side redirect to a credentials
+form. The only validation that counts is a browser render in a session-less
+context, searching the rendered DOM for a content marker you put in the file.
+Compare against a deliberately bogus path — if the real and bogus URLs render
+the same thing, the link is dead.
 
 Key conventions:
 - **Personal drive**: thoughts/{type}/YYYY-MM-DD-topic.md (plans, research, brainstorms)
@@ -757,14 +780,36 @@ break across deployments.
 | \`MCP_BASE_URL\` | API origin. Use for \`/p/:id\` direct page links and any \`/api/*\` curl examples. | \`https://api.example-swarm.dev\` |
 | \`APP_URL\` | SPA origin. Default share target for pages: \`\${APP_URL}/pages/:id\`. Append \`?mode=full\` for a maximized view (slim header + body fills viewport). | \`https://app.example-swarm.dev\` |
 | \`SWARM_URL\` | Bare host (no scheme). Use in copy / Slack messages that need just the domain. | \`app.example-swarm.dev\` |
-| \`AGENT_FS_LIVE_URL\` | agent-fs live origin. Share files via \`\${AGENT_FS_LIVE_URL}/file/~/<org_id>/<drive_id>/<file_path>\`. Defaults to \`https://live.agent-fs.dev\` if unset. | \`https://live.agent-fs.dev\` |
+| \`AGENT_FS_LIVE_URL\` | agent-fs live origin. Agent↔agent pointer only — see the warning below before giving one to a human. Defaults to \`https://live.agent-fs.dev\` if unset. | \`https://live.agent-fs.dev\` |
+
+**These hosts are not automatically public.** On a self-hosted deployment
+\`MCP_BASE_URL\` is very often an internal service address (\`http://api:3013\`,
+a compose/k8s DNS name) that resolves only inside the cluster, and \`APP_URL\`
+may sit behind an edge gate (SSO, HTTP Basic) that a swarm-side
+\`authMode: "public"\` page cannot override. Before you ship a link to a human,
+know which of your hosts that human can actually open — and if none can, say
+so instead of shipping a link that will 401.
 
 **Page share patterns** (most common):
 - Default: \`\${APP_URL}/pages/:id\` — opens the SPA with chrome.
 - Full / standalone: \`\${APP_URL}/pages/:id?mode=full\` — hides sidebar/header; slim row with title + Exit-Full.
-- Direct API (no SPA): \`\${MCP_BASE_URL}/p/:id\` — HTML inlines; JSON 302→SPA.
+- Direct API (no SPA): \`\${MCP_BASE_URL}/p/:id\` — HTML inlines; JSON 302→SPA. Reachable only from inside the network when \`MCP_BASE_URL\` is an internal address.
 
-**agent-fs share pattern**: \`\${AGENT_FS_LIVE_URL}/file/~/<org_id>/<drive_id>/<file_path>\`.
+**agent-fs is not a human-delivery channel.** Its live viewer requires the
+recipient to sign in as a member of the drive, and when \`AGENT_FS_LIVE_URL\`
+is unset the fallback is the public \`live.agent-fs.dev\` SaaS, which has no
+knowledge of a self-hosted org or drive: a human who clicks gets an API-key
+form, never the file. Use \`\${AGENT_FS_LIVE_URL}/file/~/<org_id>/<drive_id>/<file_path>\`
+(ids from \`agent-fs drive list\`) as an agent↔agent pointer and in
+\`store-progress\` attachments. To actually deliver a file to a human, upload
+the bytes with the native file-upload tool of the surface the request came from.
+
+**A share link is never validated by HTTP status code.** These viewers are
+catch-all single-page apps: they return \`200\` for any path, including an
+invented one, then redirect client-side to a login or credentials form. Validate
+by rendering the URL in a browser with no session and searching the resulting
+DOM for a content marker you planted — and compare against a deliberately bogus
+path. Identical renders mean the link is dead.
 
 If a required env var is missing, **surface that to the user** — never fall
 back to a localhost value or invent a host when shipping a share link.

@@ -67,8 +67,11 @@ agent-swarm x composio POST /tools/execute/GOOGLEDOCS_CREATE_DOCUMENT_MARKDOWN \
 2. Write the converted content to your own agent-fs namespace with a short
    provenance header naming the source document and import method.
 3. Resolve the destination org and drive from the environment or
-   `agent-fs stat <path> --json`; the `artifacts` skill documents the canonical
-   storage and share-link workflow. Never copy org or drive IDs from an example.
+   `agent-fs drive list` — `agent-fs stat` returns file metadata only and has no
+   org or drive id. The `artifacts` skill documents the canonical storage
+   workflow, and why an agent-fs link is an agent↔agent pointer rather than a
+   way to deliver the doc to a human. Never copy org or drive IDs from an
+   example.
 4. Read the stored file back and assert several markers: the title, a middle
    phrase, and the final sentence. A successful byte-count response alone does
    not prove fidelity.
