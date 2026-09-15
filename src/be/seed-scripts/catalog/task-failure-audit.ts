@@ -41,6 +41,43 @@ function reasonCluster(reason: string): string {
   return r.toLowerCase().slice(0, 48);
 }
 
+async function hydrateFailureReasons(tasks: any[], ctx: any): Promise<any[]> {
+  const hydrated: any[] = [];
+  const concurrency = 10;
+
+  for (let i = 0; i < tasks.length; i += concurrency) {
+    const chunk = tasks.slice(i, i + concurrency);
+    const details = await Promise.allSettled(
+      chunk.map((task: any) =>
+        typeof task.id === "string" ? ctx.swarm.task_get({ taskId: task.id }) : Promise.resolve(null),
+      ),
+    );
+
+    for (let j = 0; j < chunk.length; j++) {
+      const task = chunk[j];
+      const detail = details[j];
+      if (
+        typeof task.id !== "string" ||
+        detail?.status !== "fulfilled" ||
+        detail.value?.success === false
+      ) {
+        hydrated.push({ ...task, failureReasonUnavailable: !task.failureReason });
+        continue;
+      }
+
+      const payload = detail.value?.data ?? detail.value;
+      const detailedTask =
+        payload?.task && typeof payload.task === "object" ? payload.task : payload;
+      hydrated.push({
+        ...task,
+        failureReason: detailedTask?.failureReason ?? task.failureReason,
+      });
+    }
+  }
+
+  return hydrated;
+}
+
 /** Cluster recently failed swarm tasks by reason, agent, or schedule. */
 export default async function taskFailureAudit(args: any, ctx: any) {
   const parsed = argsSchema.safeParse(args);
@@ -60,13 +97,15 @@ export default async function taskFailureAudit(args: any, ctx: any) {
     return { error: "task_list failed with status " + res.status };
   }
   const payload: any = res && res.data ? res.data : res;
-  const tasks: any = payload && Array.isArray(payload.tasks) ? payload.tasks : [];
+  const listedTasks: any[] = payload && Array.isArray(payload.tasks) ? payload.tasks : [];
+  const tasks = groupBy === "reason" ? await hydrateFailureReasons(listedTasks, ctx) : listedTasks;
 
   const groups: any = {};
   for (const t of tasks) {
     let key: string;
     if (groupBy === "agent") key = t.agentId || "(unassigned)";
     else if (groupBy === "schedule") key = t.scheduleId || "(not scheduled)";
+    else if (t.failureReasonUnavailable) key = "(reason unavailable: task_get failed)";
     else key = reasonCluster(t.failureReason || "");
     if (!groups[key]) groups[key] = { key, count: 0, taskIds: [], sampleReason: "" };
     groups[key].count++;
