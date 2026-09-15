@@ -47,7 +47,8 @@ agent-fs --org <org-id> write \
 
 Your org and drive context is already configured — you only need `--org` when
 writing somewhere other than your default. Read the id from
-`agent-fs stat <path> --json` rather than hardcoding one you saw in an example.
+`agent-fs drive list` rather than hardcoding one you saw in an example
+(`agent-fs stat` returns file metadata only — it has no org or drive id).
 
 Always verify the write landed — agent-fs writes can fail silently with an
 empty payload:
@@ -57,24 +58,58 @@ agent-fs stat <path> --json | jq '.size'
 # If size < 200 bytes on a non-trivial artifact, the write FAILED — re-do it.
 ```
 
-### Sharing agent-fs files with humans
+### Getting a file to a human
 
-The deployment configures the live viewer host through `AGENT_FS_LIVE_URL`; the
-documented fallback is `https://live.agent-fs.dev`. Resolve it in the shell and
-combine it with the `orgId` and `driveId` returned by `agent-fs stat`:
+**An agent-fs link is not how a human receives a file.** The live viewer and
+the daemon's raw route both require the recipient to be signed in as a member
+of the drive, and when `AGENT_FS_LIVE_URL` is unset the documented fallback is
+the public `https://live.agent-fs.dev` SaaS — which knows nothing about a
+self-hosted org or drive. A human who clicks that link lands on a "Connect to
+agent-fs — enter your API endpoint and key" form and never sees the file.
+
+To actually deliver an artifact to a human, **send the bytes on the surface the
+request arrived on**:
+
+- Slack thread → `slack-upload-file` (native upload; the file renders in the
+  thread for anyone in the channel, no extra account).
+- A report they will read → publish a page and give them the page URL, but only
+  after you have confirmed that host is one they can open.
+
+Keep the agent-fs path as the durable record and as a pointer for other agents:
+attach it via `store-progress` `attachments` (`kind: "agent-fs"`).
+
+An agent-fs URL is appropriate only when `AGENT_FS_LIVE_URL` points at a host
+the recipient can reach *and* they hold credentials on that drive. Build it
+from `agent-fs drive list` — `agent-fs stat` does not return org or drive ids:
 
 ```bash
 FILE_PATH='thoughts/<agent-id>/research/<file>.md'
-AGENT_FS_HOST=${AGENT_FS_LIVE_URL:-https://live.agent-fs.dev}
-FILE_STAT=$(agent-fs stat "$FILE_PATH" --json)
-ORG_ID=$(printf '%s' "$FILE_STAT" | jq -r '.orgId')
-DRIVE_ID=$(printf '%s' "$FILE_STAT" | jq -r '.driveId')
+AGENT_FS_HOST=${AGENT_FS_LIVE_URL:?set this to a host the recipient can reach}
+# agent-fs drive list --json => [{ orgId, orgName, drives: [{ id, name, isDefault }] }]
+# Pick the org that owns the file — here the shared "swarm" org — and its default drive.
+DRIVES=$(agent-fs drive list --json)
+ORG_ID=$(printf '%s' "$DRIVES" | jq -r '.[] | select(.orgName == "swarm") | .orgId')
+DRIVE_ID=$(printf '%s' "$DRIVES" | jq -r '.[] | select(.orgName == "swarm") | .drives[] | select(.isDefault) | .id')
 SHARE_URL="${AGENT_FS_HOST%/}/file/~/$ORG_ID/$DRIVE_ID/$FILE_PATH"
 printf '%s\n' "$SHARE_URL"
 ```
 
 Paste the printed concrete URL into Markdown or a message. Markdown does not
 expand environment variables.
+
+### Never validate a share link by HTTP status code
+
+These viewers are catch-all single-page apps: they return `200` on **any**
+path, including one you invented, and then redirect client-side to a login or
+credentials form. A `curl -I` that shows `200` proves nothing.
+
+The only validation that counts:
+
+1. Put a unique content marker in the file or page.
+2. Render the URL in a real browser in a **session-less / incognito** context.
+3. Search the rendered DOM for that marker.
+4. Repeat against a deliberately bogus path. If real and bogus render the same
+   thing, your link is dead — report that rather than shipping it.
 
 ## Shared filesystem
 
